@@ -29,11 +29,47 @@ set ở tests/vn_pii_testset.jsonl):
 Đo bằng: pytest tests/test_pii.py -v -s   (in ra precision/recall)
 """
 from __future__ import annotations
+import re
 
-
-def detect(text: str) -> list[dict]:
-    raise NotImplementedError("BƯỚC 3a: implement PII detection")
+def detect(text: str) -> list[dict]:        
+    entities: list[dict] = []
+    # 1. EMAIL
+    for m in re.finditer(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text):
+        entities.append({"type": "EMAIL", "start": m.start(), "end": m.end()})
+    # 2. VN_PHONE (0 + 9 chữ số)
+    for m in re.finditer(r"\b0\d{9}\b", text):
+        entities.append({"type": "VN_PHONE", "start": m.start(), "end": m.end()})
+    # 3. VN_BANK_ACCOUNT đi kèm tiền tố "STK" / "số tài khoản"
+    stk_spans = set()
+    for m in re.finditer(r"(?:STK|số tài khoản|stk)\s+(\d{8,16})\b", text, re.IGNORECASE):
+        start, end = m.start(1), m.end(1)
+        entities.append({"type": "VN_BANK_ACCOUNT", "start": start, "end": end})
+        stk_spans.add((start, end))
+    # 4. VN_CCCD (12 chữ số liên tiếp, không phải STK)
+    for m in re.finditer(r"\b\d{12}\b", text):
+        span = (m.start(), m.end())
+        if span not in stk_spans:
+            if not any(e["start"] <= m.start() and m.end() <= e["end"] for e in entities):
+                entities.append({"type": "VN_CCCD", "start": m.start(), "end": m.end()})
+    # 5. VN_BANK_ACCOUNT khác (độ dài 8-16 chữ số, trừ 10 chữ số phone và 12 chữ số CCCD)
+    for m in re.finditer(r"\b\d{8,16}\b", text):
+        length = m.end() - m.start()
+        if length in (10, 12):
+            continue
+        span = (m.start(), m.end())
+        if span not in stk_spans:
+            if not any(e["start"] <= m.start() and m.end() <= e["end"] for e in entities):
+                entities.append({"type": "VN_BANK_ACCOUNT", "start": m.start(), "end": m.end()})
+    entities.sort(key=lambda x: x["start"])
+    return entities
 
 
 def redact(text: str) -> str:
-    raise NotImplementedError("BƯỚC 3a: implement PII redaction")
+    entities = detect(text)
+    # Thay thế ngược từ cuối văn bản về đầu để giữ nguyên offset
+    entities.sort(key=lambda x: x["start"], reverse=True)
+    res = text
+    for e in entities:
+        replacement = f"[REDACTED_{e['type']}]"
+        res = res[: e["start"]] + replacement + res[e["end"] :]
+    return res

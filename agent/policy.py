@@ -37,4 +37,7 @@ class PolicyContext:
 
 
 def check(context: PolicyContext) -> tuple[bool, str]:
-    raise NotImplementedError("BƯỚC 3b: implement policy check")
+    if context.data_classification == "restricted" and context.egress_enabled:
+        return False, "DENY: Egress of restricted classification data to external network is strictly forbidden."
+    # Mọi trường hợp ALLOW đều phải trả về reason đầy đủ
+    return True, f"ALLOW: Action permitted for owner='{context.agent_owner}' under classification='{context.data_classification}'."

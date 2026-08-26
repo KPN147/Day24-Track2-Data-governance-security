@@ -52,12 +52,110 @@ Interface bắt buộc (agent/loop.py import và gọi hàm này nếu tồn t�
         chỉ có sink log và ledger là khác.
 """
 from __future__ import annotations
-
+import hashlib
+import json
+import re
 from pathlib import Path
-
+from agent import ledger, policy, tools
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 DEFAULT_LEDGER_PATH = REPORTS_DIR / "ledger.jsonl"
-
-
+def _hash_args(args: dict) -> str:
+    return hashlib.sha256(json.dumps(args, sort_keys=True).encode("utf-8")).hexdigest()[:8]
 def handle(message: str, llm, log_dir: Path | None = None) -> str:
-    raise NotImplementedError("BƯỚC 3c: implement trifecta split")
+    ledger_path = (log_dir / "ledger.jsonl") if log_dir else DEFAULT_LEDGER_PATH
+    # ------------------------------------------------------------------
+    # RUN A: Đọc untrusted content (corpus)
+    # ------------------------------------------------------------------
+    ctx_a = policy.PolicyContext(
+        data_classification="internal",
+        request_purpose="search-tickets",
+        agent_owner="run-a",
+        delegation_depth=0,
+        egress_enabled=False,
+    )
+    allow_a, reason_a = policy.check(ctx_a)
+    ledger.append(
+        {
+            "ts": "2026-08-26T15:00:00Z",
+            "agent_id": "lab24-agent",
+            "run_id": "run-a",
+            "tool": "search_docs",
+            "args_hash": _hash_args({"query": message}),
+            "classification": ctx_a.data_classification,
+            "decision": "allow" if allow_a else "deny",
+            "reason": reason_a,
+        },
+        ledger_path,
+    )
+    if not allow_a:
+        return "Access denied."
+    docs = tools.search_docs(message)
+    combined_text = "\n\n".join(d["text"] for d in docs)
+    # Trích xuất ticket_id từ TÊN FILE (ví dụ: "ticket-901.md" -> 901)
+    valid_ticket_ids = set()
+    for d in docs:
+        m = re.search(r"ticket-(\d+)\.md", d["id"])
+        if m:
+            valid_ticket_ids.add(int(m.group(1)))
+    # Kiểm tra injection để log deny egress nếu bị tấn công
+    injected = llm.find_injection(combined_text)
+    if injected is not None:
+        ctx_exfil = policy.PolicyContext(
+            data_classification="restricted",
+            request_purpose="exfiltration",
+            agent_owner="run-a",
+            delegation_depth=1,
+            egress_enabled=True,
+        )
+        allow_exfil, reason_exfil = policy.check(ctx_exfil)
+        ledger.append(
+            {
+                "ts": "2026-08-26T15:00:01Z",
+                "agent_id": "lab24-agent",
+                "run_id": "run-a",
+                "tool": "http_post",
+                "args_hash": _hash_args({"url": injected.target_url}),
+                "classification": ctx_exfil.data_classification,
+                "decision": "allow" if allow_exfil else "deny",
+                "reason": reason_exfil,
+            },
+            ledger_path,
+        )
+    # ------------------------------------------------------------------
+    # RUN B: Tra cứu Private Data bằng NGUỒN TIN CẬY (related_tickets)
+    # ------------------------------------------------------------------
+    customers_data = json.loads(tools.CUSTOMERS_FILE.read_text(encoding="utf-8"))
+    target_customer_ids = []
+    for c in customers_data:
+        related = c.get("related_tickets", [])
+        if any(tid in related for tid in valid_ticket_ids):
+            target_customer_ids.append(c["customer_id"])
+    collected = []
+    for cid in target_customer_ids:
+        ctx_b = policy.PolicyContext(
+            data_classification="restricted",
+            request_purpose="read-customer-details",
+            agent_owner="run-b",
+            delegation_depth=1,
+            egress_enabled=False,
+        )
+        allow_b, reason_b = policy.check(ctx_b)
+        ledger.append(
+            {
+                "ts": "2026-08-26T15:00:02Z",
+                "agent_id": "lab24-agent",
+                "run_id": "run-b",
+                "tool": "read_customer",
+                "args_hash": _hash_args({"customer_id": cid}),
+                "classification": ctx_b.data_classification,
+                "decision": "allow" if allow_b else "deny",
+                "reason": reason_b,
+            },
+            ledger_path,
+        )
+        if allow_b:
+            try:
+                collected.append(tools.read_customer(cid))
+            except tools.ToolError:
+                continue
+    return llm.summarize(docs)

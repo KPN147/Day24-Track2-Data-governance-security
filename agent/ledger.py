@@ -32,13 +32,54 @@ Sinh viên phải tự tay chứng minh được: sửa 1 ký tự trong 1 dòng
 rồi gọi verify() phải trả về False.
 """
 from __future__ import annotations
-
+import hashlib
+import json
 from pathlib import Path
-
-
 def append(entry: dict, path: Path) -> dict:
-    raise NotImplementedError("BƯỚC 3d: implement ledger append")
-
-
+    path.parent.mkdir(parents=True, exist_ok=True)
+    prev_hash = "0" * 64
+    if path.exists() and path.stat().st_size > 0:
+        lines = path.read_text(encoding="utf-8").strip().splitlines()
+        if lines:
+            last_entry = json.loads(lines[-1])
+            prev_hash = last_entry.get("hash", "0" * 64)
+    entry_data = dict(entry)
+    entry_data["prev_hash"] = prev_hash
+    # Tính sha256 với sort_keys=True
+    serialized = json.dumps(entry_data, sort_keys=True, ensure_ascii=False)
+    entry_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    entry_data["hash"] = entry_hash
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry_data, ensure_ascii=False) + "\n")
+    return entry_data
 def verify(path: Path) -> bool:
-    raise NotImplementedError("BƯỚC 3d: implement ledger verify")
+    if not path.exists():
+        return False
+    lines = path.read_text(encoding="utf-8").strip().splitlines()
+    if not lines:
+        return True
+    expected_prev_hash = "0" * 64
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            return False
+        # 1. Kiểm tra reason non-empty
+        reason = entry.get("reason")
+        if not reason or not str(reason).strip():
+            return False
+        # 2. Kiểm tra prev_hash
+        if entry.get("prev_hash") != expected_prev_hash:
+            return False
+        # 3. Tính lại hash để kiểm tra tamper
+        stored_hash = entry.get("hash")
+        entry_copy = dict(entry)
+        entry_copy.pop("hash", None)
+        serialized = json.dumps(entry_copy, sort_keys=True, ensure_ascii=False)
+        recalculated_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        if stored_hash != recalculated_hash:
+            return False
+        expected_prev_hash = stored_hash
+    return True
